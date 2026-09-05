@@ -198,16 +198,41 @@ jobs:
           set -euo pipefail
           API_KEY_DIR="$HOME/.appstoreconnect/private_keys"
           API_KEY_PATH="$API_KEY_DIR/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
-          IPA_PATH="$RUNNER_TEMP/COP-Italy-export/App.ipa"
+          IPA_PATHS=()
+
+          while IFS= read -r IPA_CANDIDATE; do
+            IPA_PATHS+=("$IPA_CANDIDATE")
+          done < <(find "$RUNNER_TEMP/COP-Italy-export" -type f -name '*.ipa' -print)
+
+          if [[ "${#IPA_PATHS[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one exported IPA in $RUNNER_TEMP/COP-Italy-export; found ${#IPA_PATHS[@]}."
+            exit 1
+          fi
+
+          IPA_PATH="${IPA_PATHS[0]}"
+
+          if ! ALTOOL_PATH="$(xcrun --find altool 2>/dev/null)"; then
+            echo "::error::The selected Xcode does not provide altool for App Store Connect uploads."
+            exit 1
+          fi
+
+          ALTOOL_HELP="$("$ALTOOL_PATH" --help 2>&1)"
+          for REQUIRED_OPTION in --upload-app --apiKey --apiIssuer; do
+            if [[ "$ALTOOL_HELP" != *"$REQUIRED_OPTION"* ]]; then
+              echo "::error::The selected Xcode altool does not support $REQUIRED_OPTION required for API-key uploads."
+              exit 1
+            fi
+          done
 
           mkdir -p "$API_KEY_DIR"
           printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$API_KEY_PATH"
           chmod 600 "$API_KEY_PATH"
-          test -f "$IPA_PATH"
+          printf 'Uploading exported IPA: %s\n' "$IPA_PATH"
+          printf 'Using Xcode altool with App Store Connect API-key authentication.\n'
 
-          xcrun iTMSTransporter \
-            -m upload \
-            -assetFile "$IPA_PATH" \
+          "$ALTOOL_PATH" --upload-app \
+            -f "$IPA_PATH" \
+            -t ios \
             -apiKey "$APP_STORE_CONNECT_KEY_ID" \
             -apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
 
