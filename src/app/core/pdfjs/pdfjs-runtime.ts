@@ -49,6 +49,10 @@ export async function loadPdfJsModule(
 }
 
 export function shouldUsePdfJsFakeWorker(): boolean {
+  return isNativeIosCapacitor();
+}
+
+export function isNativeIosCapacitor(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios';
 }
 

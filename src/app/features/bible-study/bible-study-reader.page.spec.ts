@@ -10,6 +10,7 @@ import { BibleStudyPdfRendererService } from '../../core/services/bible-study-pd
 import { BibleStudyService } from '../../core/services/bible-study.service';
 import { ExternalBrowserService } from '../../core/services/external-browser.service';
 import { StackNavigationService } from '../../core/services/stack-navigation.service';
+import { SentryTelemetryService } from '../../core/services/sentry-telemetry.service';
 import { BibleStudyReaderPage } from './bible-study-reader.page';
 
 class MockLocaleService {
@@ -76,6 +77,7 @@ describe('BibleStudyReaderPage', () => {
   let externalBrowserService: jasmine.SpyObj<ExternalBrowserService>;
   let stackNavigationService: jasmine.SpyObj<StackNavigationService>;
   let appToast: jasmine.SpyObj<AppToastService>;
+  let sentryTelemetry: jasmine.SpyObj<SentryTelemetryService>;
 
   const manual: BibleStudyManualDetail = {
     id: 14,
@@ -128,6 +130,10 @@ describe('BibleStudyReaderPage', () => {
     externalBrowserService = jasmine.createSpyObj<ExternalBrowserService>('ExternalBrowserService', ['openUrl']);
     stackNavigationService = jasmine.createSpyObj<StackNavigationService>('StackNavigationService', ['backWithFallback']);
     appToast = jasmine.createSpyObj<AppToastService>('AppToastService', ['success', 'error']);
+    sentryTelemetry = jasmine.createSpyObj<SentryTelemetryService>('SentryTelemetryService', [
+      'addFeatureBreadcrumb',
+      'captureFeatureError',
+    ]);
 
     pdfRendererService.destroy.and.resolveTo();
     pdfRendererService.loadDocument.and.resolveTo({ totalPages: 3 });
@@ -161,6 +167,7 @@ describe('BibleStudyReaderPage', () => {
         { provide: ExternalBrowserService, useValue: externalBrowserService },
         { provide: StackNavigationService, useValue: stackNavigationService },
         { provide: AppToastService, useValue: appToast },
+        { provide: SentryTelemetryService, useValue: sentryTelemetry },
         { provide: LocaleService, useClass: MockLocaleService },
         {
           provide: ActivatedRoute,

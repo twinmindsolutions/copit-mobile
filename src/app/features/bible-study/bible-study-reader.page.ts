@@ -25,6 +25,7 @@ import { BibleStudyPdfRendererService } from '../../core/services/bible-study-pd
 import { BibleStudyService } from '../../core/services/bible-study.service';
 import { ExternalBrowserService } from '../../core/services/external-browser.service';
 import { StackNavigationService } from '../../core/services/stack-navigation.service';
+import { SentryTelemetryService } from '../../core/services/sentry-telemetry.service';
 
 type ReaderViewState = 'loading' | 'ready' | 'error';
 type ReaderLoadingStage = 'manual' | 'document' | 'render';
@@ -66,6 +67,7 @@ export class BibleStudyReaderPage implements AfterViewInit, OnDestroy {
   private readonly stackNavigation = inject(StackNavigationService);
   private readonly appToast = inject(AppToastService);
   private readonly localeService = inject(LocaleService);
+  private readonly sentryTelemetry = inject(SentryTelemetryService);
 
   @ViewChild(IonContent) private readonly ionContent?: IonContent;
   @ViewChildren('pageCanvas') private readonly pageCanvasRefs?: QueryList<ElementRef<HTMLCanvasElement>>;
@@ -159,6 +161,13 @@ export class BibleStudyReaderPage implements AfterViewInit, OnDestroy {
         this.loadingStage = 'document';
         this.errorKind = 'none';
         this.errorMessage = '';
+        this.sentryTelemetry.addFeatureBreadcrumb('bible_study', 'pdf_reader_open_requested', {
+          platform: Capacitor.getPlatform(),
+          route: 'bible-study/:id/read',
+          study_id: rawId,
+          pdf_host: this.getSanitizedPdfHost(pdfSourceUrl),
+          transport_mode: this.getPdfTransportMode(),
+        });
         void this.loadPdfDocument(pdfSourceUrl, requestId);
       },
       error: (error: unknown) => {
@@ -259,9 +268,27 @@ export class BibleStudyReaderPage implements AfterViewInit, OnDestroy {
       return;
     }
 
+    const diagnostics = {
+      platform: Capacitor.getPlatform(),
+      pdf_host: this.getSanitizedPdfHost(this.pdfSourceUrl),
+      transport_mode: 'external',
+      pdf_stage: 'external-open',
+    };
+
     try {
+      this.sentryTelemetry.addFeatureBreadcrumb('bible_study', 'pdf_reader_external_open_requested', diagnostics);
       await this.externalBrowserService.openUrl(this.pdfSourceUrl);
-    } catch {
+    } catch (error) {
+      const errorDetails = this.describePdfError(error);
+      this.sentryTelemetry.captureFeatureError(
+        'bible_study',
+        'pdf_reader_external_open_failed',
+        this.createSanitizedError(error, errorDetails),
+        {
+          ...diagnostics,
+          ...errorDetails,
+        }
+      );
       await this.appToast.error(this.localeService.translate('bibleStudy.externalOpenError'));
     }
   }
@@ -683,6 +710,39 @@ export class BibleStudyReaderPage implements AfterViewInit, OnDestroy {
 
   private isNativePlatform(): boolean {
     return Capacitor.isNativePlatform();
+  }
+
+  private getPdfTransportMode(): 'direct-url' | 'native-binary' {
+    return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios' ? 'native-binary' : 'direct-url';
+  }
+
+  private getSanitizedPdfHost(url: string): string {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return 'invalid-url';
+    }
+  }
+
+  private describePdfError(error: unknown): { exception_name: string; exception_message: string } {
+    const errorRecord = error as { name?: string; message?: string } | undefined;
+    return {
+      exception_name: String(errorRecord?.name ?? 'UnknownError'),
+      exception_message: String(errorRecord?.message ?? 'Unknown error').replace(/https?:\/\/[^\s'"`]+/gi, '[URL]'),
+    };
+  }
+
+  private createSanitizedError(
+    originalError: unknown,
+    details: { exception_name: string; exception_message: string }
+  ): Error {
+    const sanitizedError = new Error(details.exception_message);
+    sanitizedError.name = details.exception_name;
+    const stack = (originalError as { stack?: unknown } | undefined)?.stack;
+    if (typeof stack === 'string') {
+      sanitizedError.stack = stack.replace(/https?:\/\/[^\s'"`]+/gi, '[URL]');
+    }
+    return sanitizedError;
   }
 
   private getNavigatorShare():

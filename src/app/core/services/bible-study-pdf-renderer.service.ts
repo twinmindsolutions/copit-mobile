@@ -1,11 +1,13 @@
 import { DOCUMENT } from '@angular/common';
 import { Inject, Injectable } from '@angular/core';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 
 import { environment } from '../../../environments/environment';
 import {
   loadPdfJsModule,
   loadPdfJsFakeWorkerModule,
   PDFJS_WORKER_ASSET_PATH,
+  isNativeIosCapacitor,
   type PdfJsModule,
   shouldUsePdfJsFakeWorker,
 } from '../pdfjs/pdfjs-runtime';
@@ -28,6 +30,13 @@ export interface BibleStudyPdfPageRenderResult {
 const DEFAULT_OUTPUT_SCALE = 2;
 const MIN_RENDER_SCALE = 0.6;
 const MAX_RENDER_SCALE = 2.4;
+type PdfLoadMode = 'native-binary' | 'direct-url';
+type PdfLoadStage = 'pdfjs-runtime' | 'worker-setup' | 'native-download' | 'pdfjs-load' | 'document-ready';
+type PdfWorkerMode = 'normal-worker' | 'fake-worker';
+type PdfExceptionDetails = {
+  exception_name: string;
+  exception_message: string;
+};
 @Injectable({ providedIn: 'root' })
 export class BibleStudyPdfRendererService {
   private static workerConfigured = false;
@@ -37,6 +46,12 @@ export class BibleStudyPdfRendererService {
   private documentProxy?: PdfDocumentProxy;
   private renderTasks = new Map<number, PdfRenderTask>();
   private sessionId = 0;
+  private activeLoadContext?: {
+    platform: string;
+    pdf_host: string;
+    transport_mode: PdfLoadMode;
+    worker_mode: PdfWorkerMode;
+  };
 
   constructor(
     @Inject(DOCUMENT) private readonly document: Document,
@@ -45,23 +60,67 @@ export class BibleStudyPdfRendererService {
 
   async loadDocument(url: string): Promise<BibleStudyPdfDocumentLoadResult> {
     await this.destroy();
+    const useNativeBinary = isNativeIosCapacitor();
+    const loadMode: PdfLoadMode = useNativeBinary ? 'native-binary' : 'direct-url';
+    const diagnostics = {
+      platform: Capacitor.getPlatform(),
+      pdf_host: this.getSanitizedHost(url),
+      transport_mode: loadMode,
+      native_http_status: null as number | null,
+      response_byte_length: null as number | null,
+      pdf_stage: 'pdfjs-runtime' as PdfLoadStage,
+      worker_mode: useNativeBinary ? 'fake-worker' as PdfWorkerMode : 'normal-worker' as PdfWorkerMode,
+    };
+
     try {
       const pdfjsLib = await loadPdfJsModule();
+      diagnostics.pdf_stage = 'worker-setup';
       const workerMode = await this.configureWorker(pdfjsLib);
+      diagnostics.worker_mode = workerMode;
+      this.activeLoadContext = {
+        platform: diagnostics.platform,
+        pdf_host: diagnostics.pdf_host,
+        transport_mode: diagnostics.transport_mode,
+        worker_mode: workerMode,
+      };
       const activeSessionId = ++this.sessionId;
       const startedAt = performance.now();
-      this.log('getDocument start', {
-        pdfjsVersion: '6.2.108',
-        workerMode,
-        workerSrc: BibleStudyPdfRendererService.resolvedWorkerSrc,
-        documentOrigin: this.getSanitizedOrigin(url),
-        documentPath: this.getSanitizedPath(url),
+      diagnostics.pdf_stage = useNativeBinary ? 'native-download' : 'pdfjs-load';
+      const fetchStartedAt = performance.now();
+      this.addLifecycleBreadcrumb('pdf_fetch_started', {
+        ...diagnostics,
       });
-      this.documentTask = pdfjsLib.getDocument({
-        url,
-        withCredentials: false,
-        useSystemFonts: true,
-      });
+
+      if (useNativeBinary) {
+        const response = await CapacitorHttp.get({
+          url,
+          responseType: 'arraybuffer',
+        });
+        diagnostics.native_http_status = response.status;
+        if (response.status < 200 || response.status >= 300) {
+          throw new Error(`Native PDF download failed with status ${response.status}.`);
+        }
+
+        const data = this.decodeNativePdfResponse(response.data);
+        diagnostics.response_byte_length = data.byteLength;
+        this.addLifecycleBreadcrumb('pdf_fetch_succeeded', {
+          ...diagnostics,
+          elapsed_ms: Math.round(performance.now() - fetchStartedAt),
+        });
+        diagnostics.pdf_stage = 'pdfjs-load';
+        this.addLifecycleBreadcrumb('pdfjs_load_started', diagnostics);
+        this.documentTask = pdfjsLib.getDocument({
+          data,
+          useSystemFonts: true,
+        });
+      } else {
+        this.addLifecycleBreadcrumb('pdfjs_load_started', diagnostics);
+        this.documentTask = pdfjsLib.getDocument({
+          url,
+          withCredentials: false,
+          useSystemFonts: true,
+        });
+      }
 
       const documentProxy = await this.documentTask.promise;
 
@@ -71,19 +130,31 @@ export class BibleStudyPdfRendererService {
       }
 
       this.documentProxy = documentProxy;
-      this.log('document loaded', {
-        totalPages: documentProxy.numPages,
-        durationMs: Math.round(performance.now() - startedAt),
+      if (!useNativeBinary) {
+        this.addLifecycleBreadcrumb('pdf_fetch_succeeded', {
+          ...diagnostics,
+          elapsed_ms: Math.round(performance.now() - fetchStartedAt),
+        });
+      }
+      diagnostics.pdf_stage = 'document-ready';
+      this.addLifecycleBreadcrumb('pdfjs_load_succeeded', {
+        ...diagnostics,
+        total_pages: documentProxy.numPages,
+        elapsed_ms: Math.round(performance.now() - startedAt),
       });
 
       return {
         totalPages: documentProxy.numPages,
       };
     } catch (error) {
-      this.log('loadingTask rejection', this.describeError(error));
-      this.reportFailure('PDF document startup or loading failed.', error, {
-        document_origin: this.getSanitizedOrigin(url),
-        document_path: this.getSanitizedPath(url),
+      const errorDetails = this.describeError(error);
+      const failureEvent = diagnostics.pdf_stage === 'native-download' || this.isFetchFailure(error)
+        ? 'pdf_fetch_failed'
+        : 'pdfjs_load_failed';
+      this.log(failureEvent, { ...diagnostics, failure_stage: diagnostics.pdf_stage, ...errorDetails });
+      this.reportFailure(failureEvent, error, errorDetails, {
+        ...diagnostics,
+        failure_stage: diagnostics.pdf_stage,
       });
       throw error;
     }
@@ -126,6 +197,11 @@ export class BibleStudyPdfRendererService {
     canvas.style.width = `${renderViewport.width}px`;
     canvas.style.height = `${renderViewport.height}px`;
 
+    this.addLifecycleBreadcrumb('pdf_page_render_started', {
+      ...this.getActiveLoadDiagnostics(),
+      pdf_stage: 'render',
+      page_number: pageNumber,
+    });
     const renderTask = page.render({
       canvas: null,
       canvasContext,
@@ -147,11 +223,18 @@ export class BibleStudyPdfRendererService {
         scale: renderScale,
       };
     } catch (error) {
-      this.log('page render failed', {
+      const errorDetails = this.describeError(error);
+      this.log('pdf_page_render_failed', {
         pageNumber,
-        ...this.describeError(error),
+        ...this.getActiveLoadDiagnostics(),
+        pdf_stage: 'render',
+        ...errorDetails,
       });
-      this.reportFailure('PDF page rendering failed.', error, { page_number: pageNumber });
+      this.reportFailure('pdf_page_render_failed', error, errorDetails, {
+        ...this.getActiveLoadDiagnostics(),
+        pdf_stage: 'render',
+        page_number: pageNumber,
+      });
       throw error;
     } finally {
       this.renderTasks.delete(pageNumber);
@@ -211,25 +294,20 @@ export class BibleStudyPdfRendererService {
     );
   }
 
-  private async configureWorker(pdfjsLib: PdfJsModule): Promise<'fake-worker' | 'web-worker'> {
+  private async configureWorker(pdfjsLib: PdfJsModule): Promise<PdfWorkerMode> {
     if (shouldUsePdfJsFakeWorker()) {
       await loadPdfJsFakeWorkerModule();
       return 'fake-worker';
     }
 
     if (BibleStudyPdfRendererService.workerConfigured) {
-      return 'web-worker';
+      return 'normal-worker';
     }
 
     BibleStudyPdfRendererService.resolvedWorkerSrc = new URL(PDFJS_WORKER_ASSET_PATH, this.document.baseURI).toString();
     pdfjsLib.GlobalWorkerOptions.workerSrc = BibleStudyPdfRendererService.resolvedWorkerSrc;
-    this.log('worker configured', {
-      pdfjsVersion: '6.2.108',
-      workerSrc: BibleStudyPdfRendererService.resolvedWorkerSrc,
-      baseUri: this.document.baseURI,
-    });
     BibleStudyPdfRendererService.workerConfigured = true;
-    return 'web-worker';
+    return 'normal-worker';
   }
 
   private clampScale(value: number): number {
@@ -242,31 +320,86 @@ export class BibleStudyPdfRendererService {
     }
   }
 
-  private reportFailure(message: string, error: unknown, details: Record<string, unknown>): void {
-    this.sentryTelemetry.captureFeatureError('bible_study', message, error, details);
+  private addLifecycleBreadcrumb(event: string, details: Record<string, unknown>): void {
+    this.sentryTelemetry.addFeatureBreadcrumb('bible_study', event, details);
+    this.log(event, details);
   }
 
-  private getSanitizedOrigin(url: string): string {
+  private reportFailure(
+    message: string,
+    originalError: unknown,
+    error: PdfExceptionDetails,
+    details: Record<string, unknown>
+  ): void {
+    this.sentryTelemetry.captureFeatureError('bible_study', message, this.createSanitizedError(originalError, error), {
+      ...details,
+      ...error,
+    });
+  }
+
+  private getSanitizedHost(url: string): string {
     try {
-      return new URL(url).origin;
+      return new URL(url).hostname;
     } catch {
       return 'invalid-url';
     }
   }
 
-  private getSanitizedPath(url: string): string {
-    try {
-      return new URL(url).pathname;
-    } catch {
-      return 'invalid-url';
-    }
+  private getActiveLoadDiagnostics(): Record<string, unknown> {
+    return this.activeLoadContext ?? {
+      platform: Capacitor.getPlatform(),
+      pdf_host: 'unknown',
+      transport_mode: 'unknown',
+      worker_mode: 'unknown',
+    };
   }
 
-  private describeError(error: unknown): Record<string, string> {
+  private decodeNativePdfResponse(data: unknown): Uint8Array {
+    if (typeof data !== 'string') {
+      throw new Error('Native PDF response did not contain binary data.');
+    }
+
+    const binary = atob(data);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    if (!bytes.byteLength) {
+      throw new Error('Native PDF response was empty.');
+    }
+    return bytes;
+  }
+
+  private describeError(error: unknown): PdfExceptionDetails {
     const errorRecord = error as { name?: string; message?: string; stack?: string } | undefined;
     return {
-      name: String(errorRecord?.name ?? 'UnknownError'),
-      message: String(errorRecord?.message ?? 'Unknown error'),
+      exception_name: String(errorRecord?.name ?? 'UnknownError'),
+      exception_message: this.sanitizeErrorMessage(String(errorRecord?.message ?? 'Unknown error')),
     };
+  }
+
+  private createSanitizedError(originalError: unknown, details: PdfExceptionDetails): Error {
+    const sanitizedError = new Error(details.exception_message);
+    sanitizedError.name = details.exception_name;
+    const stack = (originalError as { stack?: unknown } | undefined)?.stack;
+    if (typeof stack === 'string') {
+      sanitizedError.stack = this.sanitizeErrorMessage(stack);
+    }
+    return sanitizedError;
+  }
+
+  private sanitizeErrorMessage(message: string): string {
+    return message.replace(/https?:\/\/[^\s'"`]+/gi, (url) => {
+      try {
+        return `[${new URL(url).hostname}]`;
+      } catch {
+        return '[URL]';
+      }
+    });
+  }
+
+  private isFetchFailure(error: unknown): boolean {
+    const message = String((error as { message?: string } | undefined)?.message ?? '').toLowerCase();
+    return message.includes('load failed') || message.includes('network') || message.includes('fetch') || message.includes('cors');
   }
 }

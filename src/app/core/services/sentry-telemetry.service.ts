@@ -125,13 +125,15 @@ export class SentryTelemetryService implements OnDestroy {
       return;
     }
 
-    this.addFeatureBreadcrumb(featureArea, message, data, level);
+    const sanitizedData = data ? sanitizeSentryValue(data) as Record<string, unknown> : undefined;
+    this.addFeatureBreadcrumb(featureArea, message, sanitizedData, level);
 
     Sentry.withScope((scope) => {
       scope.setLevel(level);
       scope.setTag('feature_area', featureArea);
-      if (data) {
-        scope.setContext('feature', sanitizeSentryValue(data) as Record<string, unknown>);
+      if (sanitizedData) {
+        scope.setContext('feature', sanitizedData);
+        this.setPdfReaderDiagnosticTags(scope, sanitizedData);
       }
 
       Sentry.captureException(error instanceof Error ? error : new Error(message));
@@ -227,6 +229,21 @@ export class SentryTelemetryService implements OnDestroy {
 
   private isEnabled(): boolean {
     return environment.sentryEnabled && !!environment.sentryDsn?.trim();
+  }
+
+  private setPdfReaderDiagnosticTags(scope: { setTag(key: string, value: string): void }, data: Record<string, unknown>): void {
+    const diagnosticTags: Record<string, unknown> = {
+      platform: data['platform'],
+      pdf_stage: data['pdf_stage'],
+      pdf_transport_mode: data['transport_mode'],
+      pdf_worker_mode: data['worker_mode'],
+    };
+
+    Object.entries(diagnosticTags).forEach(([key, value]) => {
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        scope.setTag(key, String(value));
+      }
+    });
   }
 
   private featureAreaFromUrl(url: string): FeatureArea {
