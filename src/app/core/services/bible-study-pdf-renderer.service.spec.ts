@@ -4,6 +4,7 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 import { resetPdfJsModuleForTests } from '../pdfjs/pdfjs-runtime';
 import { BibleStudyPdfRendererService } from './bible-study-pdf-renderer.service';
+import { SentryTelemetryService } from './sentry-telemetry.service';
 
 describe('BibleStudyPdfRendererService', () => {
   const baseUri = 'https://example.com/app/';
@@ -14,10 +15,15 @@ describe('BibleStudyPdfRendererService', () => {
     (pdfjsLib.GlobalWorkerOptions as { workerSrc?: string }).workerSrc = '';
   });
 
+  const sentryTelemetryStub = {
+    captureFeatureError: jasmine.createSpy('captureFeatureError'),
+  };
+
   it('configures the worker to the copied app asset path', () => {
     TestBed.configureTestingModule({
       providers: [
         BibleStudyPdfRendererService,
+        { provide: SentryTelemetryService, useValue: sentryTelemetryStub },
         {
           provide: DOCUMENT,
           useValue: {
@@ -49,6 +55,7 @@ describe('BibleStudyPdfRendererService', () => {
     TestBed.configureTestingModule({
       providers: [
         BibleStudyPdfRendererService,
+        { provide: SentryTelemetryService, useValue: sentryTelemetryStub },
         {
           provide: DOCUMENT,
           useValue: {

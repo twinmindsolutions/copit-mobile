@@ -10,7 +10,7 @@ import { AuthService } from './auth.service';
 import { environment } from '../../../environments/environment';
 import { sanitizeSentryValue, toApiPath } from '../utils/sentry-sanitizer';
 
-export type FeatureArea = 'saved_churches' | 'donations' | 'profile' | 'auth' | 'churches' | 'home' | 'app';
+export type FeatureArea = 'saved_churches' | 'donations' | 'profile' | 'auth' | 'churches' | 'home' | 'app' | 'bible_study';
 
 @Injectable({ providedIn: 'root' })
 export class SentryTelemetryService implements OnDestroy {

@@ -4,9 +4,12 @@ import { Inject, Injectable } from '@angular/core';
 import { environment } from '../../../environments/environment';
 import {
   loadPdfJsModule,
+  loadPdfJsFakeWorkerModule,
   PDFJS_WORKER_ASSET_PATH,
   type PdfJsModule,
+  shouldUsePdfJsFakeWorker,
 } from '../pdfjs/pdfjs-runtime';
+import { SentryTelemetryService } from './sentry-telemetry.service';
 
 type PdfDocumentLoadingTask = import('pdfjs-dist/legacy/build/pdf.mjs').PDFDocumentLoadingTask;
 type PdfDocumentProxy = import('pdfjs-dist/legacy/build/pdf.mjs').PDFDocumentProxy;
@@ -35,49 +38,55 @@ export class BibleStudyPdfRendererService {
   private renderTasks = new Map<number, PdfRenderTask>();
   private sessionId = 0;
 
-  constructor(@Inject(DOCUMENT) private readonly document: Document) {}
+  constructor(
+    @Inject(DOCUMENT) private readonly document: Document,
+    private readonly sentryTelemetry: SentryTelemetryService
+  ) {}
 
   async loadDocument(url: string): Promise<BibleStudyPdfDocumentLoadResult> {
     await this.destroy();
-    const pdfjsLib = await loadPdfJsModule();
-    this.configureWorker(pdfjsLib);
-
-    const activeSessionId = ++this.sessionId;
-    const startedAt = performance.now();
-    this.log('getDocument start', {
-      pdfjsVersion: '6.2.108',
-      workerSrc: BibleStudyPdfRendererService.resolvedWorkerSrc,
-      documentOrigin: this.getSanitizedOrigin(url),
-      documentPath: this.getSanitizedPath(url),
-    });
-    this.documentTask = pdfjsLib.getDocument({
-      url,
-      withCredentials: false,
-      useSystemFonts: true,
-    });
-
-    let documentProxy: PdfDocumentProxy;
     try {
-      documentProxy = await this.documentTask.promise;
+      const pdfjsLib = await loadPdfJsModule();
+      const workerMode = await this.configureWorker(pdfjsLib);
+      const activeSessionId = ++this.sessionId;
+      const startedAt = performance.now();
+      this.log('getDocument start', {
+        pdfjsVersion: '6.2.108',
+        workerMode,
+        workerSrc: BibleStudyPdfRendererService.resolvedWorkerSrc,
+        documentOrigin: this.getSanitizedOrigin(url),
+        documentPath: this.getSanitizedPath(url),
+      });
+      this.documentTask = pdfjsLib.getDocument({
+        url,
+        withCredentials: false,
+        useSystemFonts: true,
+      });
+
+      const documentProxy = await this.documentTask.promise;
+
+      if (activeSessionId !== this.sessionId) {
+        await this.documentTask?.destroy();
+        throw new Error('PDF reader session changed while loading.');
+      }
+
+      this.documentProxy = documentProxy;
+      this.log('document loaded', {
+        totalPages: documentProxy.numPages,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        totalPages: documentProxy.numPages,
+      };
     } catch (error) {
       this.log('loadingTask rejection', this.describeError(error));
+      this.reportFailure('PDF document startup or loading failed.', error, {
+        document_origin: this.getSanitizedOrigin(url),
+        document_path: this.getSanitizedPath(url),
+      });
       throw error;
     }
-
-    if (activeSessionId !== this.sessionId) {
-      await this.documentTask?.destroy();
-      throw new Error('PDF reader session changed while loading.');
-    }
-
-    this.documentProxy = documentProxy;
-    this.log('document loaded', {
-      totalPages: documentProxy.numPages,
-      durationMs: Math.round(performance.now() - startedAt),
-    });
-
-    return {
-      totalPages: documentProxy.numPages,
-    };
   }
 
   async renderPage(
@@ -142,6 +151,7 @@ export class BibleStudyPdfRendererService {
         pageNumber,
         ...this.describeError(error),
       });
+      this.reportFailure('PDF page rendering failed.', error, { page_number: pageNumber });
       throw error;
     } finally {
       this.renderTasks.delete(pageNumber);
@@ -201,9 +211,14 @@ export class BibleStudyPdfRendererService {
     );
   }
 
-  private configureWorker(pdfjsLib: PdfJsModule): void {
+  private async configureWorker(pdfjsLib: PdfJsModule): Promise<'fake-worker' | 'web-worker'> {
+    if (shouldUsePdfJsFakeWorker()) {
+      await loadPdfJsFakeWorkerModule();
+      return 'fake-worker';
+    }
+
     if (BibleStudyPdfRendererService.workerConfigured) {
-      return;
+      return 'web-worker';
     }
 
     BibleStudyPdfRendererService.resolvedWorkerSrc = new URL(PDFJS_WORKER_ASSET_PATH, this.document.baseURI).toString();
@@ -214,6 +229,7 @@ export class BibleStudyPdfRendererService {
       baseUri: this.document.baseURI,
     });
     BibleStudyPdfRendererService.workerConfigured = true;
+    return 'web-worker';
   }
 
   private clampScale(value: number): number {
@@ -224,6 +240,10 @@ export class BibleStudyPdfRendererService {
     if (!environment.production) {
       console.info('[BibleStudyPdfRendererService]', message, details);
     }
+  }
+
+  private reportFailure(message: string, error: unknown, details: Record<string, unknown>): void {
+    this.sentryTelemetry.captureFeatureError('bible_study', message, error, details);
   }
 
   private getSanitizedOrigin(url: string): string {
