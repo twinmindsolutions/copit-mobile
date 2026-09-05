@@ -135,13 +135,19 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_RUN_NUMBER" -gt 0
-          MARKETING_VERSION="$(
+          BUILD_SETTINGS_OUTPUT="$(
             xcodebuild -showBuildSettings \
               -project ios/App/App.xcodeproj \
               -scheme App \
-              -configuration Release \
-              | awk -F ' = ' '/^[[:space:]]*MARKETING_VERSION = / { print $2; exit }'
+              -configuration Release
           )"
+          MARKETING_VERSION=""
+          while IFS= read -r BUILD_SETTING; do
+            if [[ "$BUILD_SETTING" == *"MARKETING_VERSION = "* ]]; then
+              MARKETING_VERSION="${BUILD_SETTING##*MARKETING_VERSION = }"
+              break
+            fi
+          done <<< "$BUILD_SETTINGS_OUTPUT"
           test -n "$MARKETING_VERSION"
           printf 'iOS marketing version: %s\n' "$MARKETING_VERSION"
           printf 'iOS build number: %s\n' "$GITHUB_RUN_NUMBER"
@@ -152,12 +158,7 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -archivePath "$RUNNER_TEMP/COP-Italy.xcarchive" \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            PRODUCT_BUNDLE_IDENTIFIER="com.peniel.platform" \
-            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
-            PROVISIONING_PROFILE_SPECIFIER="COP Italy App Store"
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
 
       - name: Export App Store Connect IPA
         shell: bash
