@@ -69,6 +69,20 @@ jobs:
           printf '%s' "$IOS_CERTIFICATE_P12_BASE64" | base64 -D > "$CERTIFICATE_PATH"
           printf '%s' "$IOS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$PROFILE_PATH"
 
+          if ! test -s "$CERTIFICATE_PATH"; then
+            echo "::error::IOS_CERTIFICATE_P12_BASE64 decoded to an empty PKCS#12 file."
+            exit 1
+          fi
+          CERTIFICATE_SIZE_BYTES="$(stat -f '%z' "$CERTIFICATE_PATH")"
+          CERTIFICATE_SHA256="$(shasum -a 256 "$CERTIFICATE_PATH" | awk '{ print $1 }')"
+          printf 'Decoded PKCS#12 size: %s bytes\n' "$CERTIFICATE_SIZE_BYTES"
+          printf 'Decoded PKCS#12 SHA-256: %s\n' "$CERTIFICATE_SHA256"
+          if ! openssl pkcs12 -in "$CERTIFICATE_PATH" -passin env:IOS_CERTIFICATE_PASSWORD -noout >/dev/null 2>&1; then
+            echo "::error::IOS_CERTIFICATE_P12_BASE64 and IOS_CERTIFICATE_PASSWORD do not form a valid PKCS#12/password pair."
+            exit 1
+          fi
+          echo "PKCS#12 certificate/password validation succeeded."
+
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
