@@ -1,0 +1,182 @@
+name: iOS TestFlight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-upload:
+    name: Build and upload COP Italy for TestFlight
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+      IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+      IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Select a supported Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          xcodebuild -version | grep -Eq '^Xcode 26\.'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the production web app
+        run: npm run build
+
+      - name: Sync Capacitor iOS
+        run: npx cap sync ios
+
+      - name: Install signing assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$APPLE_TEAM_ID" = "S54SSM74Z5"
+
+          SIGNING_DIR="$RUNNER_TEMP/cop-italy-ios-signing"
+          CERTIFICATE_PATH="$SIGNING_DIR/distribution.p12"
+          PROFILE_PATH="$SIGNING_DIR/app-store.mobileprovision"
+          PROFILE_PLIST="$SIGNING_DIR/profile.plist"
+          KEYCHAIN_PATH="$RUNNER_TEMP/cop-italy-build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+
+          mkdir -p "$SIGNING_DIR"
+          printf '%s' "$IOS_CERTIFICATE_P12_BASE64" | base64 -D > "$CERTIFICATE_PATH"
+          printf '%s' "$IOS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print Name' "$PROFILE_PLIST")"
+          PROFILE_UUID="$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PROFILE_PLIST")"
+          PROFILE_APPLICATION_IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print Entitlements:application-identifier' "$PROFILE_PLIST")"
+          test "$PROFILE_NAME" = "COP Italy App Store"
+          test "$PROFILE_APPLICATION_IDENTIFIER" = "$APPLE_TEAM_ID.com.peniel.platform"
+
+          PROFILE_INSTALL_PATH="$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          mkdir -p "$(dirname "$PROFILE_INSTALL_PATH")"
+          cp "$PROFILE_PATH" "$PROFILE_INSTALL_PATH"
+
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "PROFILE_INSTALL_PATH=$PROFILE_INSTALL_PATH"
+          } >> "$GITHUB_ENV"
+
+      - name: Archive the App Store build
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_NUMBER" -gt 0
+          MARKETING_VERSION="$(
+            xcodebuild -showBuildSettings \
+              -project ios/App/App.xcodeproj \
+              -scheme App \
+              -configuration Release \
+              | awk -F ' = ' '/^[[:space:]]*MARKETING_VERSION = / { print $2; exit }'
+          )"
+          test -n "$MARKETING_VERSION"
+          printf 'iOS marketing version: %s\n' "$MARKETING_VERSION"
+          printf 'iOS build number: %s\n' "$GITHUB_RUN_NUMBER"
+
+          xcodebuild archive \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$RUNNER_TEMP/COP-Italy.xcarchive" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="com.peniel.platform" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="COP Italy App Store"
+
+      - name: Export App Store Connect IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_OPTIONS_PLIST="$RUNNER_TEMP/ExportOptions.plist"
+          cat > "$EXPORT_OPTIONS_PLIST" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>signingCertificate</key>
+            <string>Apple Distribution</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>$APPLE_TEAM_ID</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.peniel.platform</key>
+              <string>COP Italy App Store</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/COP-Italy.xcarchive" \
+            -exportPath "$RUNNER_TEMP/COP-Italy-export" \
+            -exportOptionsPlist "$EXPORT_OPTIONS_PLIST"
+
+      - name: Upload IPA to TestFlight
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_KEY_DIR="$HOME/.appstoreconnect/private_keys"
+          API_KEY_PATH="$API_KEY_DIR/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+          IPA_PATH="$RUNNER_TEMP/COP-Italy-export/App.ipa"
+
+          mkdir -p "$API_KEY_DIR"
+          printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$API_KEY_PATH"
+          chmod 600 "$API_KEY_PATH"
+          test -f "$IPA_PATH"
+
+          xcrun iTMSTransporter \
+            -m upload \
+            -assetFile "$IPA_PATH" \
+            -apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            -apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
+
+      - name: Remove signing assets
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -f "${PROFILE_INSTALL_PATH:-}"
+          rm -f "$HOME/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+          security delete-keychain "${KEYCHAIN_PATH:-$RUNNER_TEMP/cop-italy-build.keychain-db}" || true
+          rm -f "$RUNNER_TEMP/cop-italy-ios-signing/distribution.p12"
+          rm -f "$RUNNER_TEMP/cop-italy-ios-signing/app-store.mobileprovision"
+          rm -f "$RUNNER_TEMP/cop-italy-ios-signing/profile.plist"
+          rmdir "$RUNNER_TEMP/cop-italy-ios-signing" 2>/dev/null || true
