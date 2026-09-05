@@ -35,8 +35,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
-          xcodebuild -version
-          xcodebuild -version | grep -Eq '^Xcode 26\.'
+          XCODE_VERSION_OUTPUT="$(xcodebuild -version)"
+          printf '%s\n' "$XCODE_VERSION_OUTPUT"
+          if [[ "$XCODE_VERSION_OUTPUT" != Xcode\ 26.* ]]; then
+            echo "::error::Xcode 26 is required for App Store Connect uploads."
+            exit 1
+          fi
 
       - name: Install dependencies
         run: npm ci
