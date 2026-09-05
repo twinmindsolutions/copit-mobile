@@ -1,5 +1,3 @@
-import type { FirebaseOptions } from 'firebase/app';
-
 export interface CopitMobileEnvironment {
   production: boolean;
   apiBaseUrl: string;
@@ -13,6 +11,4 @@ export interface CopitMobileEnvironment {
   sentryDsn: string;
   sentryEnvironment: string;
   sentryRelease: string;
-  analyticsEnabled: boolean;
-  firebaseConfig: FirebaseOptions | null;
 }

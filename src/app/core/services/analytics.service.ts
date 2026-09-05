@@ -1,13 +1,5 @@
 import { Injectable } from '@angular/core';
-import { Capacitor } from '@capacitor/core';
-import {
-  ConsentStatus,
-  ConsentType,
-  FirebaseAnalytics,
-} from '@capacitor-firebase/analytics';
-import { FirebaseOptions, getApps, initializeApp } from 'firebase/app';
 
-import { environment } from 'src/environments/environment';
 import { canUseMemberApp } from '../auth/member-app-access';
 import { AuthService } from './auth.service';
 import {
@@ -31,39 +23,12 @@ type AnalyticsFailureStage = 'checkout_create' | 'payment_sheet' | 'verification
 type AnalyticsVerificationSource = 'backend' | 'session_storage' | 'generic';
 type GiveNowCtaType = 'default' | 'saved_church' | 'saved_churchs_list';
 
-interface AnalyticsConsentState {
-  analyticsStorage: boolean;
-  adStorage: boolean;
-  adUserData: boolean;
-  adPersonalization: boolean;
-}
-
 @Injectable({ providedIn: 'root' })
 export class AnalyticsService {
-  private initialized = false;
-  private appOpenedTracked = false;
-  private trackingAllowed = environment.analyticsEnabled;
-  private readonly firebaseConfig = environment.firebaseConfig;
-  private consentState: AnalyticsConsentState = {
-    analyticsStorage: environment.analyticsEnabled,
-    adStorage: false,
-    adUserData: false,
-    adPersonalization: false,
-  };
-
   constructor(private readonly authService: AuthService) {}
 
   async initialize(): Promise<void> {
-    if (this.initialized || !this.isConfigured()) {
-      return;
-    }
-
-    if (this.isWebPlatform() && this.firebaseConfig && getApps().length === 0) {
-      initializeApp(this.firebaseConfig);
-    }
-
-    await this.applyConsentState();
-    this.initialized = true;
+    // Analytics is intentionally disabled until a supported provider is configured.
   }
 
   getUserType(): AnalyticsUserType {
@@ -138,29 +103,12 @@ export class AnalyticsService {
   }
 
   async trackEvent(name: AnalyticsEventName, params: Record<string, unknown>): Promise<void> {
-    if (!this.isConfigured()) {
-      return;
-    }
-
-    await this.initialize();
-    if (!this.trackingAllowed) {
-      return;
-    }
-
-    await FirebaseAnalytics.logEvent({
-      name,
-      params: this.sanitizeParams(params),
-    });
+    void name;
+    void params;
   }
 
   async trackAppOpened(): Promise<void> {
-    if (this.appOpenedTracked) {
-      return;
-    }
-    this.appOpenedTracked = true;
-    await this.trackEvent('app_opened', {
-      user_type: this.getUserType(),
-    });
+    await this.trackEvent('app_opened', { user_type: this.getUserType() });
   }
 
   async trackGiveNowTapped(ctaType: GiveNowCtaType): Promise<void> {
@@ -235,45 +183,6 @@ export class AnalyticsService {
   }
 
   async setTrackingEnabled(enabled: boolean): Promise<void> {
-    this.trackingAllowed = enabled;
-    this.consentState = {
-      ...this.consentState,
-      analyticsStorage: enabled,
-    };
-    if (!this.isConfigured()) {
-      return;
-    }
-    await this.initialize();
-    await FirebaseAnalytics.setEnabled({ enabled });
-    await this.applyConsentState();
-  }
-
-  private async applyConsentState(): Promise<void> {
-    const mapping: Array<[ConsentType, boolean]> = [
-      [ConsentType.AnalyticsStorage, this.consentState.analyticsStorage],
-      [ConsentType.AdStorage, this.consentState.adStorage],
-      [ConsentType.AdUserData, this.consentState.adUserData],
-      [ConsentType.AdPersonalization, this.consentState.adPersonalization],
-    ];
-
-    for (const [type, granted] of mapping) {
-      await FirebaseAnalytics.setConsent({
-        type,
-        status: granted ? ConsentStatus.Granted : ConsentStatus.Denied,
-      });
-    }
-  }
-
-  private isConfigured(): boolean {
-    return (
-      environment.analyticsEnabled &&
-      !!this.firebaseConfig?.apiKey &&
-      !!this.firebaseConfig?.appId &&
-      !!this.firebaseConfig?.projectId
-    );
-  }
-
-  private isWebPlatform(): boolean {
-    return Capacitor.getPlatform() === 'web';
+    void enabled;
   }
 }

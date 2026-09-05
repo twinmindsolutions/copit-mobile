@@ -3,10 +3,7 @@
 // The list of file replacements can be found in `angular.json`.
 
 import { appVersion, sentryRelease } from './app-version';
-import type { FirebaseOptions } from 'firebase/app';
 import type { CopitMobileEnvironment } from './environment.model';
-
-const firebaseConfig: FirebaseOptions | null = null;
 
 export const environment: CopitMobileEnvironment = {
   production: false,
@@ -20,8 +17,6 @@ export const environment: CopitMobileEnvironment = {
   sentryDsn: 'https://1c980c083b10f18d66a13cca5349ad92@o4511588679483392.ingest.de.sentry.io/4511588682694736',
   sentryEnvironment: 'development',
   sentryRelease,
-  analyticsEnabled: false,
-  firebaseConfig: firebaseConfig as FirebaseOptions | null,
 };
 
 /*
