@@ -55,11 +55,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
 
           test "$APPLE_TEAM_ID" = "S54SSM74Z5"
 
           SIGNING_DIR="$RUNNER_TEMP/cop-italy-ios-signing"
           CERTIFICATE_PATH="$SIGNING_DIR/distribution.p12"
+          PRIVATE_KEY_PATH="$SIGNING_DIR/distribution-key.pem"
+          CERTIFICATE_PEM_PATH="$SIGNING_DIR/distribution-certificate.pem"
+          SIGNING_PEM_PATH="$SIGNING_DIR/distribution-identity.pem"
           PROFILE_PATH="$SIGNING_DIR/app-store.mobileprovision"
           PROFILE_PLIST="$SIGNING_DIR/profile.plist"
           KEYCHAIN_PATH="$RUNNER_TEMP/cop-italy-build.keychain-db"
@@ -83,12 +87,32 @@ jobs:
           fi
           echo "PKCS#12 certificate/password validation succeeded."
 
+          if ! openssl pkcs12 -legacy -in "$CERTIFICATE_PATH" -passin env:IOS_CERTIFICATE_PASSWORD -nocerts -nodes -out "$PRIVATE_KEY_PATH" >/dev/null 2>&1; then
+            echo "::error::Unable to extract the private key from the validated PKCS#12 certificate."
+            exit 1
+          fi
+          if ! openssl pkcs12 -legacy -in "$CERTIFICATE_PATH" -passin env:IOS_CERTIFICATE_PASSWORD -clcerts -nokeys -out "$CERTIFICATE_PEM_PATH" >/dev/null 2>&1; then
+            echo "::error::Unable to extract the leaf certificate from the validated PKCS#12 certificate."
+            exit 1
+          fi
+          if ! test -s "$PRIVATE_KEY_PATH" || ! test -s "$CERTIFICATE_PEM_PATH"; then
+            echo "::error::The validated PKCS#12 certificate did not produce a usable private key and leaf certificate."
+            exit 1
+          fi
+          cat "$PRIVATE_KEY_PATH" "$CERTIFICATE_PEM_PATH" > "$SIGNING_PEM_PATH"
+
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security import "$SIGNING_PEM_PATH" -k "$KEYCHAIN_PATH" -f pemseq -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          SIGNING_IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
+          printf '%s\n' "$SIGNING_IDENTITIES"
+          if [[ "$SIGNING_IDENTITIES" != *"Apple Distribution:"* ]]; then
+            echo "::error::No valid Apple Distribution codesigning identity was imported into the temporary keychain."
+            exit 1
+          fi
 
           security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
           PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print Name' "$PROFILE_PLIST")"
@@ -195,6 +219,9 @@ jobs:
           rm -f "$HOME/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
           security delete-keychain "${KEYCHAIN_PATH:-$RUNNER_TEMP/cop-italy-build.keychain-db}" || true
           rm -f "$RUNNER_TEMP/cop-italy-ios-signing/distribution.p12"
+          rm -f "$RUNNER_TEMP/cop-italy-ios-signing/distribution-key.pem"
+          rm -f "$RUNNER_TEMP/cop-italy-ios-signing/distribution-certificate.pem"
+          rm -f "$RUNNER_TEMP/cop-italy-ios-signing/distribution-identity.pem"
           rm -f "$RUNNER_TEMP/cop-italy-ios-signing/app-store.mobileprovision"
           rm -f "$RUNNER_TEMP/cop-italy-ios-signing/profile.plist"
           rmdir "$RUNNER_TEMP/cop-italy-ios-signing" 2>/dev/null || true
