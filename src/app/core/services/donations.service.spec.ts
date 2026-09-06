@@ -75,6 +75,23 @@ describe('DonationsService', () => {
     });
   });
 
+  it('loads donation types from the ordinary public category endpoint without requesting finance offerings', () => {
+    let categories: unknown;
+
+    service.getPublicDonationCategories(42).subscribe((response) => {
+      categories = response;
+    });
+
+    const request = httpMock.expectOne((req) => {
+      return req.url.endsWith('/api/public/branches/42/donation-categories/')
+        && !req.params.has('is_financial_reporting_special_offering');
+    });
+    expect(request.request.method).toBe('GET');
+    request.flush([{ id: 1, name: 'Tithe' }]);
+
+    expect(categories).toEqual([{ id: 1, name: 'Tithe' }]);
+  });
+
   it('does not attempt auth refresh when a protected donation request returns 403', fakeAsync(() => {
     let receivedError: HttpErrorResponse | null = null;
 
